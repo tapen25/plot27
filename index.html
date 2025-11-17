@@ -3,51 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Motion Only Generator</title>
+  <title>Motion StdDev Player</title>
   <script src="https://unpkg.com/tone@latest/build/Tone.js"></script>
   <style>
     body {
-      height: 100vh; margin: 0; background: #000; color: white;
+      height: 100vh; margin: 0; background: #000; color: #fff;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      overflow: hidden;
+      font-family: monospace; overflow: hidden;
     }
-    h2 { margin-bottom: 10px; font-size: 1.5rem; letter-spacing: 2px; }
-    #status { font-size: 4rem; font-weight: 800; margin: 20px 0; color: #fff; font-variant-numeric: tabular-nums;}
-    #label { color: #666; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px;}
+    #val-display { font-size: 4rem; font-weight: bold; margin: 10px 0; color: #0ff;}
+    #label { color: #888; margin-top: 20px; font-size: 0.9rem;}
     
-    /* ビジュアライザー */
-    .bar-container {
-      width: 80%; height: 10px; background: #222; border-radius: 10px; overflow: hidden; margin-bottom: 40px;
+    .meter-box {
+      width: 80%; height: 10px; background: #333; border-radius: 5px; 
+      margin-bottom: 30px; overflow: hidden;
     }
-    .bar-fill {
-      height: 100%; width: 0%; background: linear-gradient(90deg, #4facfe, #00f2fe);
-      transition: width 0.2s ease-out;
+    .meter-bar {
+      height: 100%; width: 0%; background: linear-gradient(90deg, #0ff, #f0f);
+      transition: width 0.1s linear;
     }
 
-    /* ボタン */
     button {
-      padding: 20px 40px; font-size: 1.2rem; cursor: pointer;
-      background: #fff; color: #000; border: none; border-radius: 50px;
-      font-weight: bold; box-shadow: 0 0 20px rgba(255,255,255,0.2);
-      transition: transform 0.1s;
+      padding: 20px 40px; font-size: 1.2rem; background: #fff; color: #000;
+      border: none; border-radius: 50px; font-weight: bold; cursor: pointer;
     }
-    button:active { transform: scale(0.95); }
   </style>
 </head>
 <body>
 
-  <div id="label">Current Tempo</div>
-  <div id="status">-- BPM</div>
+  <div id="label">INTENSITY (StdDev)</div>
+  <div id="val-display">0.00</div>
   
-  <div class="bar-container"><div id="meter" class="bar-fill"></div></div>
+  <div class="meter-box"><div id="meter" class="meter-bar"></div></div>
+  <div id="bpm-label" style="color:#aaa; margin-bottom:20px;">BPM: --</div>
 
   <button id="playBtn">TAP TO START</button>
-  <p style="color:#555; font-size:0.8rem; margin-top:20px;">(Requires Accelerometer Permission)</p>
 
 <script>
 // ===============================
-// 1. 楽曲データ (Cメジャー)
+// 1. 楽曲データ (カノン進行 C Major)
 // ===============================
 const chords = [
   ["C3","E3","G3"], ["B2","D3","G3"], ["A2","C3","E3"], ["G2","B2","E3"],
@@ -65,132 +59,153 @@ const scales = [
 // ===============================
 const chordSynth = new Tone.PolySynth(Tone.Synth, { volume: -10 }).toDestination();
 const melodySynth = new Tone.Synth({ oscillator: { type: "triangle" }, volume: -2 }).toDestination();
-
-// ドラム
 const kick = new Tone.MembraneSynth({ volume: -4 }).toDestination();
 const snare = new Tone.NoiseSynth({ volume: -12, envelope: { attack: 0.001, decay: 0.2, sustain: 0 } }).toDestination();
 const hihat = new Tone.MetalSynth({ volume: -15, harmonicity: 5.1, modulationIndex: 32, resonance: 4000, octaves: 1.5 }).toDestination();
 
-// ===============================
-// 3. センサー & 状態変数
-// ===============================
-const motionBuffer = [];
-const DURATION = 2000; 
-let sensorVariance = 0.0; 
-let smoothedVariance = 0.0; 
-
-// 音楽制御パラメータ
-let activity = 0.0; // 0.0(静) 〜 1.0(動)
 let prevNote = "C4";
 
 // ===============================
-// 4. センサー処理 (devicemotionのみ)
+// 3. 加速度センサー計算ロジック (標準偏差)
 // ===============================
-function handleMotion(event) {
-  const a = event.accelerationIncludingGravity;
-  if (!a) return;
+const motionBuffer = [];
+const WINDOW_MS = 2000; // 直近2秒分
+let currentStdDev = 0.0; // 計算された標準偏差（揺れ強度）
 
-  // ベクトルの大きさ
-  const mag = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+// 音楽制御用パラメータ
+let targetBpm = 90;
+let activity = 0.0;
+
+function handleMotion(event) {
+  let x, y, z;
+
+  // 1. 重力抜きの加速度 (acceleration) を取得試行
+  if (event.acceleration && event.acceleration.x !== null) {
+    x = event.acceleration.x;
+    y = event.acceleration.y;
+    z = event.acceleration.z;
+  } else {
+    // 2. 非対応なら重力込み (accelerationIncludingGravity) を使用
+    // ※標準偏差を取るため、重力（定数成分）は計算過程で自動的に相殺されます
+    const acc = event.accelerationIncludingGravity;
+    x = acc.x;
+    y = acc.y;
+    z = acc.z;
+  }
+
+  // ベクトルの大きさ (Magnitude)
+  const mag = Math.sqrt(x*x + y*y + z*z);
   const now = Date.now();
-  
-  motionBuffer.push({ t: now, m: mag });
-  
-  // 2秒以上前のデータを削除
-  while (motionBuffer.length > 0 && motionBuffer[0].t < now - DURATION) {
+
+  // バッファに追加
+  motionBuffer.push({ t: now, val: mag });
+
+  // 2秒以上前のデータを削除 (FIFO)
+  while (motionBuffer.length > 0 && motionBuffer[0].t < now - WINDOW_MS) {
     motionBuffer.shift();
   }
-  
-  if (motionBuffer.length < 5) {
-    sensorVariance = 0;
-    return;
-  }
 
-  // 分散（揺れの激しさ）を計算
-  const magnitudes = motionBuffer.map(d => d.m);
-  const mean = magnitudes.reduce((s, v) => s + v, 0) / magnitudes.length;
-  const variance = magnitudes.reduce((s, v) => s + (v - mean) ** 2, 0) / magnitudes.length;
-  
-  sensorVariance = Math.sqrt(variance); 
+  // --- 標準偏差 (Standard Deviation) の計算 ---
+  if (motionBuffer.length > 5) {
+    const values = motionBuffer.map(d => d.val);
+    const n = values.length;
+    
+    // 平均 (Mean)
+    const mean = values.reduce((a, b) => a + b, 0) / n;
+    
+    // 分散 (Variance)
+    const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n;
+    
+    // 標準偏差
+    currentStdDev = Math.sqrt(variance);
+  } else {
+    currentStdDev = 0;
+  }
 }
 
 // ===============================
-// 5. パラメータ更新ループ
+// 4. メインループ (パラメータ適用)
 // ===============================
-const statusEl = document.getElementById('status');
-const meterEl = document.getElementById('meter');
+const valDisplay = document.getElementById('val-display');
+const meterBar = document.getElementById('meter');
+const bpmLabel = document.getElementById('bpm-label');
+let smoothedStdDev = 0.0;
 
-function updateParameters() {
-  // 値を滑らかにする (Low-pass filter)
-  smoothedVariance += (sensorVariance - smoothedVariance) * 0.05;
+function updateParams() {
+  // 値の急激な変化を抑える（スムージング）
+  smoothedStdDev += (currentStdDev - smoothedStdDev) * 0.1;
+
+  // --- マッピング ---
+  // 標準偏差はおよそ 0 (静止) 〜 5.0以上 (激しい揺れ) くらいの値になります
   
-  // --- A. BPM計算 ---
-  // 静止(Var=0) -> 90 BPM
-  // 歩行(Var=3〜5) -> 110〜120 BPM
-  // 走行(Var=8以上) -> 145 BPM (Max)
-  let targetBpm = 90 + (smoothedVariance * 7); 
-  if (targetBpm > 145) targetBpm = 145;
-  if (targetBpm < 90) targetBpm = 90;
+  // 1. BPM計算 (基準90 + 揺れ*12)
+  let bpm = 90 + (smoothedStdDev * 12);
+  if (bpm > 160) bpm = 160; // 上限
+  if (bpm < 90) bpm = 90;   // 下限
+  targetBpm = bpm;
 
-  // Tone.jsに適用
-  if(Tone.Transport.state === 'started'){
-     Tone.Transport.bpm.value = targetBpm;
+  if (Tone.Transport.state === 'started') {
+    Tone.Transport.bpm.value = targetBpm;
   }
-  
-  // --- B. Activity計算 (アレンジの激しさ) ---
-  // 0.0 〜 1.0 に正規化
-  let rawActivity = smoothedVariance / 5.0;
-  if (rawActivity > 1.0) rawActivity = 1.0;
-  activity = rawActivity;
 
-  // UI更新
-  statusEl.innerText = Math.floor(targetBpm) + " BPM";
-  meterEl.style.width = (activity * 100) + "%";
-  
-  requestAnimationFrame(updateParameters);
+  // 2. Activity計算 (0.0 〜 1.0)
+  activity = smoothedStdDev / 4.0;
+  if (activity > 1.0) activity = 1.0;
+
+  // --- UI更新 ---
+  valDisplay.innerText = smoothedStdDev.toFixed(2);
+  meterBar.style.width = (activity * 100) + "%";
+  bpmLabel.innerText = "BPM: " + Math.round(targetBpm);
+
+  requestAnimationFrame(updateParams);
 }
-updateParameters();
+updateParams();
 
 // ===============================
-// 6. 音楽生成ロジック
+// 5. 音楽生成 (カノン進行固定)
 // ===============================
 
-// 音程選択アルゴリズム
+// 音程決定ロジック
 function nextNote(prev, candidates){
-  const bias = 1 + activity * 4; 
+  // 揺れが大きいほど音程が飛びやすくなるバイアス
+  const bias = 1 + activity * 5; 
   let best = candidates[0];
   let bestScore = 999;
+  
   for(const n of candidates){
     const midiPrev = Tone.Frequency(prev).toMidi();
     const midiN = Tone.Frequency(n).toMidi();
-    const score = Math.abs(Math.abs(midiN - midiPrev) - bias); 
+    // 前の音との距離が、現在の「勢い(bias)」に近いものを選ぶ
+    const score = Math.abs(Math.abs(midiN - midiPrev) - bias);
     if(score < bestScore){ bestScore = score; best = n; }
   }
   return best;
 }
 
-// メインシーケンス
 function setupMusic() {
-  // --- A. コード (全音符) ---
+  // A. コード進行 (全音符)
   Tone.Transport.scheduleRepeat((time) => {
     const bar = Math.floor(Number(Tone.Transport.position.split(":")[0]) % 8);
     if(chords[bar]) chordSynth.triggerAttackRelease(chords[bar], "1n", time);
   }, "1n");
 
-  // --- B. メロディ (自動生成) ---
+  // B. メロディ (Activityに応じて細かくなる)
   let tickCounter = 0;
   let nextNoteTick = 0;
+  
   Tone.Transport.scheduleRepeat((time) => {
     if (tickCounter < nextNoteTick) { tickCounter++; return; }
 
-    // activityが高いほど細かい音符になる
-    let step = (activity < 0.3) ? 4 : (activity > 0.7 ? 1 : 2); 
+    // 揺れ小: 4分音符主体 / 揺れ大: 16分音符主体
+    let step = (activity < 0.2) ? 4 : (activity > 0.6 ? 1 : 2);
+    // ランダム性
     if(Math.random() > 0.7) step *= 2; 
     
     const duration = (step >= 4) ? "4n" : "8n";
 
-    // 音を鳴らす
-    if (Math.random() > ((activity > 0.8) ? 0.1 : 0.2)) {
+    // 音を鳴らす判定
+    const density = (activity > 0.8) ? 0.9 : 0.7; // 激しいときは休符少なめ
+    if (Math.random() < density) {
       const barIdx = Math.floor(tickCounter / 16) % 8;
       if (scales[barIdx]) {
         const next = nextNote(prevNote, scales[barIdx]);
@@ -202,28 +217,26 @@ function setupMusic() {
     tickCounter++;
   }, "16n");
 
-  // --- C. ドラム (パターン変化) ---
+  // C. ドラム (Activityに応じてパターン変化)
   Tone.Transport.scheduleRepeat((time) => {
-    // 16分音符位置 (0-15)
     const s = Math.floor(Tone.Transport.ticks / (Tone.Transport.PPQ / 4)) % 16;
-    
     let k=false, n=false, h=false;
-    
-    // パターン分岐
-    if (activity < 0.25) {
-      // [静止/ゆっくり] Kickのみ
+
+    // パターン定義
+    if (activity < 0.3) {
+      // [静] キックのみ (心音風)
       if (s === 0 || s === 8) k = true;
-      if (s % 4 === 0) h = true; 
-    } else if (activity < 0.6) {
-      // [歩行] 8ビート (Kick, Snare)
+      if (s % 4 === 0) h = true;
+    } else if (activity < 0.7) {
+      // [中] 8ビート
       if (s === 0 || s === 10) k = true;
       if (s === 4 || s === 12) n = true;
       if (s % 2 === 0) h = true;
     } else {
-      // [走行/ダンス] 4つ打ち + 16ビート
+      // [動] 4つ打ちダンス
       if (s % 4 === 0) k = true;
       if (s === 4 || s === 12) n = true;
-      h = true; 
+      h = true; // 16分ハイハット
     }
 
     if (k) kick.triggerAttackRelease("C1", "8n", time);
@@ -236,7 +249,7 @@ function setupMusic() {
 }
 
 // ===============================
-// 7. 開始処理
+// 6. 開始ボタン
 // ===============================
 const btn = document.getElementById('playBtn');
 let isPlaying = false;
@@ -245,18 +258,13 @@ btn.addEventListener('click', async () => {
   if (!isPlaying) {
     await Tone.start();
     
-    // iOS向け許可リクエスト
+    // iOS 13+ 対策
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
         const res = await DeviceMotionEvent.requestPermission();
-        if (res === 'granted') {
-          window.addEventListener('devicemotion', handleMotion);
-        } else {
-          alert("センサー許可がないとBPMが変化しません");
-        }
+        if (res === 'granted') window.addEventListener('devicemotion', handleMotion);
       } catch (e) { console.error(e); }
     } else {
-      // Android / PC
       window.addEventListener('devicemotion', handleMotion);
     }
 
@@ -264,9 +272,8 @@ btn.addEventListener('click', async () => {
     Tone.Transport.start();
     isPlaying = true;
     btn.innerText = "STOP";
-    btn.style.background = "#ff4444";
+    btn.style.background = "#f0f";
     btn.style.color = "#fff";
-    
   } else {
     Tone.Transport.stop();
     Tone.Transport.cancel();
@@ -277,11 +284,11 @@ btn.addEventListener('click', async () => {
     btn.style.color = "#000";
     
     // リセット
-    sensorVariance = 0;
-    smoothedVariance = 0;
-    activity = 0;
-    statusEl.innerText = "-- BPM";
-    meterEl.style.width = "0%";
+    motionBuffer.length = 0;
+    currentStdDev = 0;
+    valDisplay.innerText = "0.00";
+    meterBar.style.width = "0%";
+    bpmLabel.innerText = "BPM: --";
   }
 });
 </script>
